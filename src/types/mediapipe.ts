@@ -1,4 +1,4 @@
-// Complete MediaPipe type definitions
+// MediaPipe type definitions
 export interface PoseLandmark {
   x: number
   y: number
@@ -66,7 +66,13 @@ export interface MediaPipeDrawingUtils {
   lerp: (value: number, min: number, max: number, targetMin: number, targetMax: number) => number
 }
 
-export interface TechNeckDetectionResult {
-  hasTechNeck: boolean
-  score: number
+// Global window extensions
+declare global {
+  interface Window {
+    PoseLandmarker: MediaPipePoseLandmarker
+    FilesetResolver: MediaPipeFilesetResolver
+    DrawingUtils: MediaPipeDrawingUtils
+    poseLandmarker?: PoseLandmarkerInstance
+    mediapipeLoaded?: boolean
+  }
 }

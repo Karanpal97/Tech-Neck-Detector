@@ -1,26 +1,11 @@
 "use client"
 
-import { useState, useRef, useEffect, useCallback } from "react"
+import { useEffect, useRef, useState } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Badge } from "@/components/ui/badge"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import {
-  Camera,
-  CameraOff,
-  AlertTriangle,
-  CheckCircle,
-  Info,
-  Smartphone,
-  Monitor,
-  Clock,
-  RefreshCw,
-  Wifi,
-} from "lucide-react"
-import { useMediaPipe } from "@/hooks/useMediaPipe"
-import { useCamera } from "@/hooks/useCamera"
-import type { PoseLandmark, PoseDetectionResult, TechNeckDetectionResult } from "@/types/mediapipe"
+import { Camera, Info, Smartphone, Monitor, Clock, Loader2 } from "lucide-react"
+import type { PoseLandmarkerInstance, PoseDetectionResult, DrawingUtilsInstance, LandmarkData } from "@/types/mediapipe"
 
 const EXERCISE_TIPS = [
   {
@@ -88,230 +73,198 @@ const PREVENTION_TIPS = [
   },
 ] as const
 
-interface PostureStatus {
-  status: string
-  color: string
-  icon: typeof CheckCircle
-}
-
-type RunningMode = "IMAGE" | "VIDEO"
-
 export default function TechNeckDetector() {
-  const [techNeckDetected, setTechNeckDetected] = useState<boolean>(false)
-  const [postureScore, setPostureScore] = useState<number>(0)
-  const [detectionCount, setDetectionCount] = useState<number>(0)
-  const [activeTab, setActiveTab] = useState<string>("camera")
-  const [runningMode, setRunningMode] = useState<RunningMode>("IMAGE")
-
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const animationRef = useRef<number | undefined>(undefined)
-  const lastVideoTimeRef = useRef<number>(-1)
+  const demosSectionRef = useRef<HTMLDivElement>(null)
 
-  const { poseLandmarker, isLoading: isMediaPipeLoading, error: mediaPipeError } = useMediaPipe()
-  const {
-    isActive: isWebcamActive,
-    error: cameraError,
-    isSupported: isCameraSupported,
-    startCamera,
-    stopCamera,
-  } = useCamera()
+  const [isLoading, setIsLoading] = useState(true)
+  const [activeTab, setActiveTab] = useState("camera")
+  const [detectedPoses, setDetectedPoses] = useState(0)
+  const [isWebcamActive, setIsWebcamActive] = useState(false)
+  const [poseLandmarker, setPoseLandmarker] = useState<PoseLandmarkerInstance | null>(null)
 
-  // Tech neck detection algorithm
-  const detectTechNeck = useCallback((landmarks: PoseLandmark[]): TechNeckDetectionResult => {
-    if (landmarks.length < 33) return { hasTechNeck: false, score: 0 }
+  // Store these in refs to access in prediction loop
+  const webcamRunningRef = useRef(false)
+  const runningModeRef = useRef<"IMAGE" | "VIDEO">("IMAGE")
+  const lastVideoTimeRef = useRef(-1)
 
-    // Key landmarks for tech neck detection
-    const nose = landmarks[0]
-    const leftEar = landmarks[7]
-    const rightEar = landmarks[8]
-    const leftShoulder = landmarks[11]
-    const rightShoulder = landmarks[12]
+  useEffect(() => {
+    // Load MediaPipe script
+    const script = document.createElement("script")
+    script.type = "module"
+    script.innerHTML = `
+      import {
+        PoseLandmarker,
+        FilesetResolver,
+        DrawingUtils
+      } from "https://cdn.skypack.dev/@mediapipe/tasks-vision@0.10.0";
 
-    // Validate landmarks exist
-    if (!nose || !leftEar || !rightEar || !leftShoulder || !rightShoulder) {
-      return { hasTechNeck: false, score: 0 }
+      window.PoseLandmarker = PoseLandmarker;
+      window.FilesetResolver = FilesetResolver;
+      window.DrawingUtils = DrawingUtils;
+      
+      // Create pose landmarker exactly like your code
+      const createPoseLandmarker = async () => {
+        const vision = await FilesetResolver.forVisionTasks(
+          "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+        );
+        window.poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
+          baseOptions: {
+            modelAssetPath: "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task",
+            delegate: "GPU"
+          },
+          runningMode: "IMAGE",
+          numPoses: 2
+        });
+        
+        // Signal that MediaPipe is ready
+        window.dispatchEvent(new CustomEvent('mediapipe-ready'));
+      };
+      createPoseLandmarker();
+    `
+    document.head.appendChild(script)
+
+    // Wait for MediaPipe to load
+    const handleMediaPipeReady = () => {
+      console.log("✅ MediaPipe loaded!")
+      setPoseLandmarker(window.poseLandmarker || null)
+      setIsLoading(false)
+
+      if (demosSectionRef.current) {
+        demosSectionRef.current.style.opacity = "1"
+      }
     }
 
-    // Calculate average ear and shoulder positions
-    const avgEarX = (leftEar.x + rightEar.x) / 2
-    const avgShoulderX = (leftShoulder.x + rightShoulder.x) / 2
-    const avgShoulderY = (leftShoulder.y + rightShoulder.y) / 2
-    const avgEarY = (leftEar.y + rightEar.y) / 2
+    window.addEventListener("mediapipe-ready", handleMediaPipeReady)
 
-    // Calculate forward head posture
-    const headForwardDistance = Math.abs(avgEarX - avgShoulderX)
-    const neckLength = Math.abs(avgEarY - avgShoulderY)
-
-    // Prevent division by zero
-    if (neckLength === 0) return { hasTechNeck: false, score: 0 }
-
-    // Normalize the forward distance by neck length
-    const forwardRatio = headForwardDistance / neckLength
-
-    // Tech neck threshold (adjust based on testing)
-    const techNeckThreshold = 0.15
-    const hasTechNeck = forwardRatio > techNeckThreshold
-
-    // Calculate posture score (0-100, higher is better)
-    const score = Math.max(0, Math.min(100, (1 - forwardRatio / 0.3) * 100))
-
-    return { hasTechNeck, score: Math.round(score) }
+    return () => {
+      window.removeEventListener("mediapipe-ready", handleMediaPipeReady)
+    }
   }, [])
 
-  // Start webcam
-  const handleStartWebcam = async (): Promise<void> => {
-    if (!poseLandmarker || !videoRef.current) return
-
-    const success = await startCamera(videoRef.current)
-    if (success && videoRef.current) {
-      videoRef.current.addEventListener("loadeddata", () => {
-        predictWebcam()
-      })
-    }
-  }
-
-  // Stop webcam
-  const handleStopWebcam = (): void => {
-    stopCamera()
-    if (animationRef.current !== undefined) {
-      cancelAnimationFrame(animationRef.current)
-      animationRef.current = undefined
-    }
-    setTechNeckDetected(false)
-    setPostureScore(0)
-    setRunningMode("IMAGE")
-  }
-
-  // Webcam prediction loop - exactly like the working example
-  const predictWebcam = useCallback(async (): Promise<void> => {
-    if (!videoRef.current || !canvasRef.current || !poseLandmarker || !isWebcamActive) return
-
-    const video = videoRef.current
-    const canvas = canvasRef.current
-    const ctx = canvas.getContext("2d")
-
-    if (!ctx || video.readyState < 2) {
-      if (isWebcamActive) {
-        animationRef.current = requestAnimationFrame(predictWebcam)
-      }
+  // React button click handler
+  const handleCameraToggle = async () => {
+    if (!poseLandmarker) {
+      console.log("Wait! poseLandmarker not loaded yet.")
       return
     }
 
-    // Set canvas size to match video
-    canvas.style.height = "360px"
-    canvas.style.width = "480px"
+    const video = videoRef.current
+    const canvasElement = canvasRef.current
+
+    if (!video || !canvasElement) return
+
+    if (webcamRunningRef.current === true) {
+      // Stop webcam
+      webcamRunningRef.current = false
+      setIsWebcamActive(false)
+
+      // Stop video stream
+      if (video.srcObject) {
+        const stream = video.srcObject as MediaStream
+        stream.getTracks().forEach((track) => track.stop())
+        video.srcObject = null
+      }
+    } else {
+      // Start webcam
+      try {
+        const constraints = {
+          video: {
+            width: { ideal: 640, min: 320, max: 1280 },
+            height: { ideal: 480, min: 240, max: 720 },
+            facingMode: "user",
+          },
+        }
+        const stream = await navigator.mediaDevices.getUserMedia(constraints)
+
+        video.srcObject = stream
+        webcamRunningRef.current = true
+        setIsWebcamActive(true)
+
+        video.addEventListener("loadeddata", () => {
+          console.log("📹 Video loaded, starting predictions")
+          predictWebcam()
+        })
+      } catch (error) {
+        console.error("Camera error:", error)
+        alert("Could not access camera. Please check permissions.")
+      }
+    }
+  }
+
+  // Prediction function - exactly like your code
+  const predictWebcam = async () => {
+    if (!videoRef.current || !canvasRef.current || !poseLandmarker || !webcamRunningRef.current) {
+      return
+    }
+
+    const video = videoRef.current
+    const canvasElement = canvasRef.current
+
+    // Responsive video sizing
+    const containerWidth = Math.min(480, window.innerWidth - 32)
+    const containerHeight = (containerWidth * 3) / 4 // 4:3 aspect ratio
+
+    canvasElement.style.height = `${containerHeight}px`
+    video.style.height = `${containerHeight}px`
+    canvasElement.style.width = `${containerWidth}px`
+    video.style.width = `${containerWidth}px`
+
+    // Get canvas context and drawing utils
+    const canvasCtx = canvasElement.getContext("2d")
+    if (!canvasCtx) return
+
+    const drawingUtils: DrawingUtilsInstance = new window.DrawingUtils(canvasCtx)
 
     // Switch to VIDEO mode if needed
-    if (runningMode === "IMAGE") {
-      setRunningMode("VIDEO")
+    if (runningModeRef.current === "IMAGE") {
+      runningModeRef.current = "VIDEO"
       await poseLandmarker.setOptions({ runningMode: "VIDEO" })
+      console.log("🎥 Switched to VIDEO mode")
     }
 
     const startTimeMs = performance.now()
-
     if (lastVideoTimeRef.current !== video.currentTime) {
       lastVideoTimeRef.current = video.currentTime
 
       try {
         poseLandmarker.detectForVideo(video, startTimeMs, (result: PoseDetectionResult) => {
-          ctx.save()
-          ctx.clearRect(0, 0, canvas.width, canvas.height)
+          canvasCtx.save()
+          canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height)
 
-          if (result.landmarks && result.landmarks.length > 0) {
-            const landmarks = result.landmarks[0]
+          console.log("🎯 Detected poses:", result.landmarks?.length || 0)
+          setDetectedPoses(result.landmarks?.length || 0)
 
-            // Detect tech neck
-            const { hasTechNeck, score } = detectTechNeck(landmarks)
-            setTechNeckDetected(hasTechNeck)
-            setPostureScore(score)
-
-            if (hasTechNeck) {
-              setDetectionCount((prev) => prev + 1)
-            }
-
-            // Draw pose landmarks using MediaPipe's DrawingUtils
-            if (window.DrawingUtils) {
-              const drawingUtils = new window.DrawingUtils(ctx)
-
-              // Draw landmarks
-              drawingUtils.drawLandmarks(landmarks, {
-                radius: (data) => {
-                  const zValue = data.from?.z || 0
-                  return window.DrawingUtils.lerp(zValue, -0.15, 0.1, 5, 1)
-                },
-              })
-
-              // Draw connections
-              drawingUtils.drawConnectors(landmarks, window.PoseLandmarker.POSE_CONNECTIONS)
-            }
+          for (const landmark of result.landmarks) {
+            drawingUtils.drawLandmarks(landmark, {
+              radius: (data: LandmarkData) => window.DrawingUtils.lerp(data.from?.z || 0, -0.15, 0.1, 5, 1),
+            })
+            drawingUtils.drawConnectors(landmark, window.PoseLandmarker.POSE_CONNECTIONS)
           }
-
-          ctx.restore()
+          canvasCtx.restore()
         })
       } catch (error) {
         console.error("Prediction error:", error)
       }
     }
 
-    if (isWebcamActive) {
-      animationRef.current = requestAnimationFrame(predictWebcam)
+    // Continue prediction loop
+    if (webcamRunningRef.current === true) {
+      window.requestAnimationFrame(predictWebcam)
     }
-  }, [poseLandmarker, isWebcamActive, detectTechNeck, runningMode])
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      if (animationRef.current !== undefined) {
-        cancelAnimationFrame(animationRef.current)
-      }
-      stopCamera()
-    }
-  }, [stopCamera])
-
-  const getPostureStatus = (): PostureStatus => {
-    if (postureScore >= 80) return { status: "Excellent", color: "bg-green-500", icon: CheckCircle }
-    if (postureScore >= 60) return { status: "Good", color: "bg-blue-500", icon: Info }
-    if (postureScore >= 40) return { status: "Fair", color: "bg-yellow-500", icon: AlertTriangle }
-    return { status: "Poor", color: "bg-red-500", icon: AlertTriangle }
   }
 
-  const postureStatus = getPostureStatus()
-  const StatusIcon = postureStatus.icon
-
   // Loading state
-  if (isMediaPipeLoading) {
+  if (isLoading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
         <Card className="w-full max-w-sm">
-          <CardContent className="flex items-center justify-center p-8">
+          <CardContent className="flex items-center justify-center p-6 sm:p-8">
             <div className="text-center">
-              <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto mb-4"></div>
-              <p className="text-gray-600 mb-2">Loading AI Model...</p>
+              <Loader2 className="h-8 w-8 sm:h-12 sm:w-12 animate-spin text-blue-600 mx-auto mb-4" />
+              <p className="text-gray-600 mb-2 text-sm sm:text-base">Loading AI Model...</p>
               <p className="text-xs text-gray-500">This may take a moment</p>
-            </div>
-          </CardContent>
-        </Card>
-      </div>
-    )
-  }
-
-  // Error state
-  if (mediaPipeError) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md">
-          <CardContent className="p-8">
-            <div className="text-center">
-              <Wifi className="h-12 w-12 text-red-500 mx-auto mb-4" />
-              <h2 className="text-xl font-semibold text-gray-900 mb-2">Connection Error</h2>
-              <p className="text-gray-600 mb-4">
-                Unable to load the AI model. Please check your internet connection and try again.
-              </p>
-              <Button onClick={() => window.location.reload()} className="w-full">
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Retry
-              </Button>
             </div>
           </CardContent>
         </Card>
@@ -323,28 +276,31 @@ export default function TechNeckDetector() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       {/* Header */}
       <div className="bg-white shadow-sm border-b">
-        <div className="max-w-4xl mx-auto px-4 py-4">
-          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 text-center">Tech Neck Detector</h1>
-          <p className="text-gray-600 text-sm sm:text-base text-center mt-1">AI-powered posture analysis</p>
+        <div className="max-w-4xl mx-auto px-4 py-3 sm:py-4">
+          <h1 className="text-xl sm:text-2xl md:text-3xl font-bold text-gray-900 text-center">Tech Neck Detector</h1>
+          <p className="text-gray-600 text-xs sm:text-sm md:text-base text-center mt-1">AI-powered posture analysis</p>
         </div>
       </div>
 
       {/* Mobile Navigation Tabs */}
       <div className="bg-white border-b">
-        <div className="max-w-4xl mx-auto px-4">
+        <div className="max-w-4xl mx-auto px-2 sm:px-4">
           <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-            <TabsList className="grid w-full grid-cols-3 h-12">
-              <TabsTrigger value="camera" className="text-xs sm:text-sm">
-                <Camera className="h-4 w-4 mr-1" />
-                Camera
+            <TabsList className="grid w-full grid-cols-3 h-10 sm:h-12">
+              <TabsTrigger value="camera" className="text-xs sm:text-sm px-2">
+                <Camera className="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
+                <span className="hidden xs:inline">Camera</span>
+                <span className="xs:hidden">Cam</span>
               </TabsTrigger>
-              <TabsTrigger value="exercises" className="text-xs sm:text-sm">
+              <TabsTrigger value="exercises" className="text-xs sm:text-sm px-2">
                 <span className="mr-1">💪</span>
-                Exercises
+                <span className="hidden xs:inline">Exercises</span>
+                <span className="xs:hidden">Ex</span>
               </TabsTrigger>
-              <TabsTrigger value="tips" className="text-xs sm:text-sm">
-                <Info className="h-4 w-4 mr-1" />
-                Tips
+              <TabsTrigger value="tips" className="text-xs sm:text-sm px-2">
+                <Info className="h-3 w-3 sm:h-4 sm:w-4 mr-1" />
+                <span className="hidden xs:inline">Tips</span>
+                <span className="xs:hidden">Tips</span>
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -352,126 +308,107 @@ export default function TechNeckDetector() {
       </div>
 
       {/* Content */}
-      <div className="max-w-4xl mx-auto p-4">
+      <div className="max-w-4xl mx-auto p-2 sm:p-4">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           {/* Camera Tab */}
-          <TabsContent value="camera" className="space-y-4 mt-4">
+          <TabsContent value="camera" className="space-y-3 sm:space-y-4 mt-3 sm:mt-4">
             <Card>
-              <CardHeader className="pb-4">
-                <CardTitle className="text-lg sm:text-xl">Live Posture Analysis</CardTitle>
-                <CardDescription className="text-sm">
+              <CardHeader className="pb-3 sm:pb-4">
+                <CardTitle className="text-base sm:text-lg md:text-xl">Live Pose Detection</CardTitle>
+                <CardDescription className="text-xs sm:text-sm">
                   Position yourself in front of the camera for real-time detection
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                {/* Camera Support Check */}
-                {!isCameraSupported && (
-                  <Alert className="border-red-200 bg-red-50">
-                    <AlertTriangle className="h-4 w-4 text-red-600" />
-                    <AlertDescription className="text-red-800">
-                      Camera is not supported on this device or browser.
-                    </AlertDescription>
-                  </Alert>
-                )}
+              <CardContent className="space-y-3 sm:space-y-4">
+                {/* Status */}
+                <div className="text-xs text-gray-500 text-center space-y-1">
+                  <div className="flex flex-wrap justify-center gap-2 sm:gap-4">
+                    <span>Status: {isWebcamActive ? "🟢 Running" : "🔴 Stopped"}</span>
+                    <span>Poses: {detectedPoses}</span>
+                    <span>AI: {poseLandmarker ? "✅ Ready" : "⏳ Loading"}</span>
+                  </div>
+                </div>
 
-                {/* Camera Error */}
-                {cameraError && (
-                  <Alert className="border-red-200 bg-red-50">
-                    <AlertTriangle className="h-4 w-4 text-red-600" />
-                    <AlertDescription className="text-red-800">{cameraError}</AlertDescription>
-                  </Alert>
-                )}
-
-                {/* Camera View */}
-                <div className="relative bg-black rounded-lg overflow-hidden aspect-video">
-                  <video
-                    ref={videoRef}
-                    className="w-full h-full object-cover transform scale-x-[-1]"
-                    autoPlay
-                    playsInline
-                    muted
-                  />
-                  <canvas
-                    ref={canvasRef}
-                    width={640}
-                    height={480}
-                    className="absolute top-0 left-0 w-full h-full transform scale-x-[-1]"
-                  />
+                {/* Camera view - Responsive */}
+                <div className="bg-black rounded-lg overflow-hidden flex justify-center relative">
+                  <div ref={demosSectionRef} style={{ opacity: 0.2, transition: "opacity 500ms ease-in-out" }}>
+                    <div style={{ position: "relative" }}>
+                      <video
+                        ref={videoRef}
+                        className="max-w-full h-auto"
+                        style={{
+                          width: "100%",
+                          maxWidth: "480px",
+                          height: "auto",
+                          aspectRatio: "4/3",
+                          display: "block",
+                          transform: "rotateY(180deg)",
+                          WebkitTransform: "rotateY(180deg)",
+                          MozTransform: "rotateY(180deg)",
+                        }}
+                        autoPlay
+                        playsInline
+                        muted
+                      />
+                      <canvas
+                        ref={canvasRef}
+                        width={640}
+                        height={480}
+                        className="absolute inset-0 max-w-full h-auto"
+                        style={{
+                          width: "100%",
+                          maxWidth: "480px",
+                          height: "auto",
+                          aspectRatio: "4/3",
+                          transform: "rotateY(180deg)",
+                          WebkitTransform: "rotateY(180deg)",
+                          MozTransform: "rotateY(180deg)",
+                          zIndex: 1,
+                          pointerEvents: "none",
+                        }}
+                      />
+                    </div>
+                  </div>
                   {!isWebcamActive && (
                     <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-50">
-                      <div className="text-center text-white">
-                        <Camera className="h-12 w-12 mx-auto mb-2 opacity-50" />
-                        <p className="text-sm">Camera not active</p>
+                      <div className="text-center text-white p-4">
+                        <Camera className="h-8 w-8 sm:h-12 sm:w-12 mx-auto mb-2 opacity-50" />
+                        <p className="text-xs sm:text-sm">Camera not active</p>
                       </div>
                     </div>
                   )}
                 </div>
 
-                {/* Camera Controls */}
-                <Button
-                  onClick={isWebcamActive ? handleStopWebcam : handleStartWebcam}
-                  className="w-full h-12 text-base"
-                  variant={isWebcamActive ? "destructive" : "default"}
-                  size="lg"
-                  disabled={!isCameraSupported || !poseLandmarker}
-                >
-                  {isWebcamActive ? (
-                    <>
-                      <CameraOff className="h-5 w-5 mr-2" />
-                      Stop Camera
-                    </>
-                  ) : (
-                    <>
-                      <Camera className="h-5 w-5 mr-2" />
-                      Start Camera
-                    </>
-                  )}
-                </Button>
+                {/* React button with onClick - Responsive */}
+                <div className="flex justify-center">
+                  <button
+                    onClick={handleCameraToggle}
+                    disabled={!poseLandmarker}
+                    className="bg-blue-600 hover:bg-blue-700 disabled:bg-gray-400 text-white font-medium py-2 sm:py-3 px-4 sm:px-6 rounded-lg transition-colors duration-200 text-sm sm:text-base w-full sm:w-auto sm:min-w-[200px]"
+                  >
+                    {isWebcamActive ? "DISABLE PREDICTIONS" : "ENABLE PREDICTIONS"}
+                  </button>
+                </div>
 
-                {/* Posture Status */}
-                {isWebcamActive && (
-                  <div className="space-y-3">
-                    <div className="flex items-center justify-between p-3 bg-gray-50 rounded-lg">
-                      <span className="text-sm font-medium">Posture Score:</span>
-                      <Badge className={`${postureStatus.color} text-white px-3 py-1`}>
-                        <StatusIcon className="h-3 w-3 mr-1" />
-                        {postureScore}/100
-                      </Badge>
-                    </div>
-
-                    <div className="text-center">
-                      <div
-                        className={`inline-flex items-center px-3 py-1 rounded-full text-sm font-medium ${postureStatus.color} text-white`}
-                      >
-                        {postureStatus.status} Posture
-                      </div>
-                    </div>
-
-                    {techNeckDetected && (
-                      <Alert className="border-red-200 bg-red-50">
-                        <AlertTriangle className="h-4 w-4 text-red-600" />
-                        <AlertDescription className="text-red-800 text-sm">
-                          <strong>Tech Neck Detected!</strong> Your head is positioned too far forward. Check the
-                          exercise tips to improve your posture.
-                        </AlertDescription>
-                      </Alert>
-                    )}
-
-                    <div className="text-xs text-gray-500 text-center">Detection count: {detectionCount}</div>
-                  </div>
-                )}
+                {/* Instructions */}
+                <div className="text-center text-xs sm:text-sm text-gray-600 space-y-2">
+                  <p>
+                    <strong>Instructions:</strong> Click the button above to start camera and see pose landmarks.
+                  </p>
+                  <p className="hidden sm:block">Check the browser console (F12) for debug messages.</p>
+                </div>
               </CardContent>
             </Card>
           </TabsContent>
 
           {/* Exercises Tab */}
-          <TabsContent value="exercises" className="space-y-4 mt-4">
-            <div className="grid gap-4">
+          <TabsContent value="exercises" className="space-y-3 sm:space-y-4 mt-3 sm:mt-4">
+            <div className="grid gap-3 sm:gap-4">
               {EXERCISE_TIPS.map((exercise, index) => (
                 <Card key={index} className="overflow-hidden">
-                  <CardContent className="p-4">
-                    <div className="flex items-start gap-3">
-                      <div className="text-2xl flex-shrink-0">{exercise.icon}</div>
+                  <CardContent className="p-3 sm:p-4">
+                    <div className="flex items-start gap-2 sm:gap-3">
+                      <div className="text-xl sm:text-2xl flex-shrink-0">{exercise.icon}</div>
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center justify-between mb-2">
                           <h4 className="font-semibold text-gray-900 text-sm sm:text-base">{exercise.title}</h4>
@@ -479,7 +416,9 @@ export default function TechNeckDetector() {
                             {exercise.duration}
                           </Badge>
                         </div>
-                        <p className="text-sm text-gray-600 mb-3 leading-relaxed">{exercise.description}</p>
+                        <p className="text-xs sm:text-sm text-gray-600 mb-2 sm:mb-3 leading-relaxed">
+                          {exercise.description}
+                        </p>
                         <div className="flex items-center justify-between">
                           <Badge variant="secondary" className="text-xs">
                             {exercise.frequency}
@@ -494,20 +433,20 @@ export default function TechNeckDetector() {
           </TabsContent>
 
           {/* Tips Tab */}
-          <TabsContent value="tips" className="space-y-4 mt-4">
-            <div className="grid gap-4">
+          <TabsContent value="tips" className="space-y-3 sm:space-y-4 mt-3 sm:mt-4">
+            <div className="grid gap-3 sm:gap-4">
               {PREVENTION_TIPS.map((category, index) => (
                 <Card key={index}>
-                  <CardHeader className="pb-3">
-                    <CardTitle className="flex items-center gap-2 text-base sm:text-lg">
+                  <CardHeader className="pb-2 sm:pb-3">
+                    <CardTitle className="flex items-center gap-2 text-sm sm:text-base md:text-lg">
                       {category.icon}
                       {category.category}
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="pt-0">
-                    <ul className="space-y-2">
+                    <ul className="space-y-1 sm:space-y-2">
                       {category.tips.map((tip, tipIndex) => (
-                        <li key={tipIndex} className="flex items-start gap-2 text-sm text-gray-600">
+                        <li key={tipIndex} className="flex items-start gap-2 text-xs sm:text-sm text-gray-600">
                           <span className="text-blue-500 mt-1 flex-shrink-0">•</span>
                           <span className="leading-relaxed">{tip}</span>
                         </li>
@@ -521,8 +460,8 @@ export default function TechNeckDetector() {
         </Tabs>
 
         {/* Information Footer */}
-        <Card className="mt-6">
-          <CardContent className="p-4">
+        <Card className="mt-4 sm:mt-6">
+          <CardContent className="p-3 sm:p-4">
             <div className="text-center text-xs sm:text-sm text-gray-600 space-y-2">
               <p>
                 <strong>How it works:</strong> This app uses AI to analyze your posture in real-time by detecting key
