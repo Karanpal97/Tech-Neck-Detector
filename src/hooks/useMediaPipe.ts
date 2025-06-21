@@ -1,28 +1,12 @@
 "use client"
 
 import { useState, useEffect } from "react"
-
-// MediaPipe types based on the working example
-interface MediaPipePoseLandmarker {
-  createFromOptions: (vision: any, options: any) => Promise<any>
-  detectForVideo: (video: HTMLVideoElement, timestamp: number, callback: (result: any) => void) => void
-  setOptions: (options: { runningMode: string }) => Promise<void>
-  POSE_CONNECTIONS: any[]
-}
-
-interface MediaPipeFilesetResolver {
-  forVisionTasks: (wasmPath: string) => Promise<any>
-}
-
-interface MediaPipeDrawingUtils {
-  new (
-    ctx: CanvasRenderingContext2D,
-  ): {
-    drawLandmarks: (landmarks: any[], options?: any) => void
-    drawConnectors: (landmarks: any[], connections: any[], options?: any) => void
-  }
-  lerp: (from: number, to: number, t: number, min: number, max: number) => number
-}
+import type {
+  MediaPipePoseLandmarker,
+  MediaPipeFilesetResolver,
+  MediaPipeDrawingUtils,
+  PoseLandmarkerInstance,
+} from "@/types/mediapipe"
 
 declare global {
   interface Window {
@@ -33,14 +17,14 @@ declare global {
 }
 
 export function useMediaPipe() {
-  const [poseLandmarker, setPoseLandmarker] = useState<any>(null)
+  const [poseLandmarker, setPoseLandmarker] = useState<PoseLandmarkerInstance | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     let isMounted = true
 
-    const loadMediaPipe = async () => {
+    const loadMediaPipe = async (): Promise<void> => {
       try {
         setIsLoading(true)
         setError(null)
@@ -78,7 +62,7 @@ export function useMediaPipe() {
             reject(new Error("MediaPipe loading timeout"))
           }, 30000) // 30 second timeout
 
-          const handleLoad = () => {
+          const handleLoad = (): void => {
             clearTimeout(timeout)
             window.removeEventListener("mediapipe-loaded", handleLoad)
             resolve()
@@ -107,7 +91,7 @@ export function useMediaPipe() {
       }
     }
 
-    const initializeMediaPipe = async () => {
+    const initializeMediaPipe = async (): Promise<void> => {
       try {
         // Initialize MediaPipe exactly like the working example
         const vision = await window.FilesetResolver.forVisionTasks(

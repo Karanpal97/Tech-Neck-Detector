@@ -20,6 +20,7 @@ import {
 } from "lucide-react"
 import { useMediaPipe } from "@/hooks/useMediaPipe"
 import { useCamera } from "@/hooks/useCamera"
+import type { PoseLandmark, PoseDetectionResult, TechNeckDetectionResult } from "@/types/mediapipe"
 
 const EXERCISE_TIPS = [
   {
@@ -57,7 +58,7 @@ const EXERCISE_TIPS = [
     icon: "🚪",
     duration: "2 min",
   },
-]
+] as const
 
 const PREVENTION_TIPS = [
   {
@@ -85,7 +86,7 @@ const PREVENTION_TIPS = [
       "Practice the 20-20-20 rule",
     ],
   },
-]
+] as const
 
 interface PostureStatus {
   status: string
@@ -93,17 +94,19 @@ interface PostureStatus {
   icon: typeof CheckCircle
 }
 
+type RunningMode = "IMAGE" | "VIDEO"
+
 export default function TechNeckDetector() {
-  const [techNeckDetected, setTechNeckDetected] = useState(false)
-  const [postureScore, setPostureScore] = useState(0)
-  const [detectionCount, setDetectionCount] = useState(0)
-  const [activeTab, setActiveTab] = useState("camera")
-  const [runningMode, setRunningMode] = useState("IMAGE")
+  const [techNeckDetected, setTechNeckDetected] = useState<boolean>(false)
+  const [postureScore, setPostureScore] = useState<number>(0)
+  const [detectionCount, setDetectionCount] = useState<number>(0)
+  const [activeTab, setActiveTab] = useState<string>("camera")
+  const [runningMode, setRunningMode] = useState<RunningMode>("IMAGE")
 
   const videoRef = useRef<HTMLVideoElement>(null)
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const animationRef = useRef<number>(null)
-  const lastVideoTimeRef = useRef(-1)
+  const animationRef = useRef<number | undefined>(undefined)
+  const lastVideoTimeRef = useRef<number>(-1)
 
   const { poseLandmarker, isLoading: isMediaPipeLoading, error: mediaPipeError } = useMediaPipe()
   const {
@@ -115,7 +118,7 @@ export default function TechNeckDetector() {
   } = useCamera()
 
   // Tech neck detection algorithm
-  const detectTechNeck = useCallback((landmarks: any[]) => {
+  const detectTechNeck = useCallback((landmarks: PoseLandmark[]): TechNeckDetectionResult => {
     if (landmarks.length < 33) return { hasTechNeck: false, score: 0 }
 
     // Key landmarks for tech neck detection
@@ -157,7 +160,7 @@ export default function TechNeckDetector() {
   }, [])
 
   // Start webcam
-  const handleStartWebcam = async () => {
+  const handleStartWebcam = async (): Promise<void> => {
     if (!poseLandmarker || !videoRef.current) return
 
     const success = await startCamera(videoRef.current)
@@ -169,10 +172,11 @@ export default function TechNeckDetector() {
   }
 
   // Stop webcam
-  const handleStopWebcam = () => {
+  const handleStopWebcam = (): void => {
     stopCamera()
-    if (animationRef.current) {
+    if (animationRef.current !== undefined) {
       cancelAnimationFrame(animationRef.current)
+      animationRef.current = undefined
     }
     setTechNeckDetected(false)
     setPostureScore(0)
@@ -180,7 +184,7 @@ export default function TechNeckDetector() {
   }
 
   // Webcam prediction loop - exactly like the working example
-  const predictWebcam = useCallback(async () => {
+  const predictWebcam = useCallback(async (): Promise<void> => {
     if (!videoRef.current || !canvasRef.current || !poseLandmarker || !isWebcamActive) return
 
     const video = videoRef.current
@@ -210,7 +214,7 @@ export default function TechNeckDetector() {
       lastVideoTimeRef.current = video.currentTime
 
       try {
-        poseLandmarker.detectForVideo(video, startTimeMs, (result: any) => {
+        poseLandmarker.detectForVideo(video, startTimeMs, (result: PoseDetectionResult) => {
           ctx.save()
           ctx.clearRect(0, 0, canvas.width, canvas.height)
 
@@ -232,7 +236,10 @@ export default function TechNeckDetector() {
 
               // Draw landmarks
               drawingUtils.drawLandmarks(landmarks, {
-                radius: (data: any) => window.DrawingUtils.lerp(data.from?.z || 0, -0.15, 0.1, 5, 1),
+                radius: (data) => {
+                  const zValue = data.from?.z || 0
+                  return window.DrawingUtils.lerp(zValue, -0.15, 0.1, 5, 1)
+                },
               })
 
               // Draw connections
@@ -255,7 +262,7 @@ export default function TechNeckDetector() {
   // Cleanup on unmount
   useEffect(() => {
     return () => {
-      if (animationRef.current) {
+      if (animationRef.current !== undefined) {
         cancelAnimationFrame(animationRef.current)
       }
       stopCamera()
